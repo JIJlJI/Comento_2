@@ -1,0 +1,7 @@
+../Core/Src/eeprom_25lc256.c:14:13:eeprom_cs_select	1
+../Core/Src/eeprom_25lc256.c:15:13:eeprom_cs_deselect	1
+../Core/Src/eeprom_25lc256.c:17:13:eeprom_write_bytes	1
+../Core/Src/eeprom_25lc256.c:39:13:eeprom_read_bytes	1
+../Core/Src/eeprom_25lc256.c:51:6:eeprom_log_new_dtc	7
+../Core/Src/eeprom_25lc256.c:83:9:eeprom_read_all_dtcs	3
+../Core/Src/eeprom_25lc256.c:98:6:eeprom_clear_all_dtcs	2

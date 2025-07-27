@@ -1,0 +1,151 @@
+#include "eeprom_25lc256.h"
+#include "main.h" // HAL 드라이버와 SPI 핸들을 사용하기 위해 필수
+
+// main.c에 자동으로 생성된 SPI1 핸들 변수를 사용하겠다고 선언
+extern SPI_HandleTypeDef hspi1;
+
+// CubeMX에서 EEPROM의 CS핀을 GPIO_Output으로 설정했다고 가정 (예: PA4)
+#define EEPROM_CS_PORT  GPIOA
+#define EEPROM_CS_PIN   GPIO_PIN_4
+
+// 25LC256 EEPROM 명령어
+#define EEPROM_WREN_CMD  0x06 // 쓰기 활성화 (Write Enable)
+#define EEPROM_WRITE_CMD 0x02 // 쓰기 (Write)
+#define EEPROM_READ_CMD  0x03 // 읽기 (Read)
+#define EEPROM_RDSR_CMD  0x05 // 상태 레지스터 읽기 (Read Status Register)
+
+// 상태 레지스터의 WIP(Write-In-Progress) 비트 마스크
+#define WIP_BIT_MASK 0x01
+
+// DMA 전송 완료를 확인하기 위한 플래그
+// volatile 키워드는 컴파일러 최적화로 인해 변수가 무시되는 것을 방지합니다.
+volatile bool spi_tx_complete = false;
+volatile bool spi_rx_complete = false;
+
+// HAL 라이브러리가 SPI DMA 송신을 완료하면 이 함수를 자동으로 호출합니다.
+void HAL_SPI_TxCpltCallback(SPI_HandleTypeDef *hspi)
+{
+    // 여러 SPI를 사용할 경우를 대비하여, hspi1에 대한 콜백인지 확인
+    if (hspi->Instance == SPI1) {
+        spi_tx_complete = true;
+    }
+}
+
+// HAL 라이브러리가 SPI DMA 수신을 완료하면 이 함수를 자동으로 호출합니다.
+void HAL_SPI_RxCpltCallback(SPI_HandleTypeDef *hspi)
+{
+    if (hspi->Instance == SPI1) {
+        spi_rx_complete = true;
+    }
+}
+
+// SPI 통신을 시작할 때 CS 핀을 Low로 내리는 함수
+static void eeprom_cs_select(void) {
+    HAL_GPIO_WritePin(EEPROM_CS_PORT, EEPROM_CS_PIN, GPIO_PIN_RESET);
+}
+// SPI 통신을 끝낼 때 CS 핀을 High로 올리는 함수
+static void eeprom_cs_deselect(void) {
+    HAL_GPIO_WritePin(EEPROM_CS_PORT, EEPROM_CS_PIN, GPIO_PIN_SET);
+}
+
+// EEPROM에 쓰기 작업을 하기 전에 반드시 호출해야 하는 함수
+static void eeprom_write_enable(void) {
+    uint8_t wren_cmd = EEPROM_WREN_CMD;
+    eeprom_cs_select();
+    HAL_SPI_Transmit(&hspi1, &wren_cmd, 1, 100); // WREN은 간단하므로 Polling 방식 사용
+    eeprom_cs_deselect();
+}
+
+// EEPROM 내부 쓰기 작업이 끝날 때까지 기다리는 함수
+static void eeprom_wait_for_write_complete(void) {
+    uint8_t read_status_cmd = EEPROM_RDSR_CMD;
+    uint8_t status_reg;
+    
+    eeprom_cs_select();
+    HAL_SPI_Transmit(&hspi1, &read_status_cmd, 1, 100);
+    do {
+        HAL_SPI_Receive(&hspi1, &status_reg, 1, 100);
+    } while (status_reg & WIP_BIT_MASK); // WIP 비트가 0이 될 때까지 반복
+    eeprom_cs_deselect();
+}
+
+// [요구사항 2] SPI DMA 방식을 사용하여 32비트 데이터 쓰기
+bool eeprom_write_32bit(uint16_t address, uint32_t data)
+{
+    uint8_t tx_buffer[7]; // 명령어(1) + 주소(2) + 데이터(4)
+
+    eeprom_write_enable();
+    HAL_Delay(5); // WREN 후 최소한의 대기 시간
+
+    tx_buffer[0] = EEPROM_WRITE_CMD;
+    tx_buffer[1] = (address >> 8) & 0xFF;
+    tx_buffer[2] = address & 0xFF;
+    tx_buffer[3] = (data >> 24) & 0xFF;
+    tx_buffer[4] = (data >> 16) & 0xFF;
+    tx_buffer[5] = (data >> 8) & 0xFF;
+    tx_buffer[6] = data & 0xFF;
+
+    spi_tx_complete = false; // DMA 완료 플래그 초기화
+    eeprom_cs_select();
+
+    if (HAL_SPI_Transmit_DMA(&hspi1, tx_buffer, 7) != HAL_OK) {
+        eeprom_cs_deselect();
+        return false; // DMA 시작 실패
+    }
+
+    // DMA 전송이 완료될 때까지 대기 (타임아웃 100ms)
+    uint32_t start_tick = HAL_GetTick();
+    while(spi_tx_complete == false) {
+        if(HAL_GetTick() - start_tick > 100) {
+            eeprom_cs_deselect();
+            return false;
+        }
+    }
+
+    eeprom_cs_deselect();
+    eeprom_wait_for_write_complete(); // EEPROM의 내부 쓰기 사이클 대기
+
+    return true;
+}
+
+// [요구사항 2] SPI DMA 방식을 사용하여 32비트 데이터 읽기
+uint32_t eeprom_read_32bit(uint16_t address)
+{
+    uint8_t header[3];
+    uint8_t data_bytes[4] = {0};
+    uint32_t read_data = 0;
+
+    header[0] = EEPROM_READ_CMD;
+    header[1] = (address >> 8) & 0xFF;
+    header[2] = address & 0xFF;
+
+    spi_rx_complete = false; // DMA 완료 플래그 초기화
+
+    eeprom_cs_select();
+    // 헤더(명령어+주소)는 Polling 방식으로 먼저 전송
+    HAL_SPI_Transmit(&hspi1, header, 3, 100);
+
+    // 데이터 수신은 DMA 방식으로 시작
+    if (HAL_SPI_Receive_DMA(&hspi1, data_bytes, 4) != HAL_OK) {
+        eeprom_cs_deselect();
+        return 0; // DMA 시작 실패
+    }
+
+    // DMA 수신이 완료될 때까지 대기 (타임아웃 100ms)
+    uint32_t start_tick = HAL_GetTick();
+    while(spi_rx_complete == false) {
+        if(HAL_GetTick() - start_tick > 100) {
+            eeprom_cs_deselect();
+            return 0;
+        }
+    }
+    eeprom_cs_deselect();
+
+    // 수신된 4바이트 데이터를 32비트 변수로 조합
+    read_data = ((uint32_t)data_bytes[0] << 24) |
+                ((uint32_t)data_bytes[1] << 16) |
+                ((uint32_t)data_bytes[2] << 8)  |
+                ((uint32_t)data_bytes[3]);
+
+    return read_data;
+}

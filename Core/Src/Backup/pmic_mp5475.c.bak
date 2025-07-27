@@ -1,0 +1,59 @@
+#include <string.h>
+#include "pmic_mp5475.h"
+#include "main.h"
+
+extern I2C_HandleTypeDef hi2c1;
+
+// DMA 전송 완료를 확인하기 위한 플래그
+volatile bool i2c_rx_complete = false;
+
+// HAL 라이브러리가 I2C DMA 수신을 완료하면 이 함수를 자동으로 호출
+void HAL_I2C_MemRxCpltCallback(I2C_HandleTypeDef *hi2c)
+{
+    if (hi2c->Instance == I2C1) {
+        i2c_rx_complete = true;
+    }
+}
+
+HAL_StatusTypeDef pmic_get_all_faults(PmicFaultStatus *status)
+{
+    if (status == NULL) return HAL_ERROR;
+
+    // 상태 초기화
+    memset(status, 0, sizeof(PmicFaultStatus));
+
+    RegisterUvOvStatus uv_ov_reg;
+    RegisterOcStatus oc_reg;
+    RegisterSystemStatus temp_reg;
+
+    uint8_t read_buffer[3];
+    uint16_t dev_address = (PMIC_SLAVE_ADDRESS << 1);
+
+    // I2C DMA 방식으로 읽기 시작
+    i2c_rx_complete = false;
+    if (HAL_I2C_Mem_Read_DMA(&hi2c1, dev_address, REGISTER_UV_OV_STATUS, I2C_MEMADD_SIZE_8BIT, read_buffer, 3) != HAL_OK) {
+        return HAL_ERROR; // DMA 시작 실패
+    }
+
+    // DMA 전송이 완료될 때까지 잠시 대기 (최대 100ms)
+    uint32_t start_tick = HAL_GetTick();
+    while (i2c_rx_complete == false) {
+        if (HAL_GetTick() - start_tick > 100) {
+            return HAL_TIMEOUT; // 타임아웃
+        }
+    }
+
+    // union을 사용하여 데이터 해석
+    uv_ov_reg.raw = read_buffer[0];
+    oc_reg.raw    = read_buffer[1];
+    temp_reg.raw  = read_buffer[2];
+
+    // 결과 저장
+    if (uv_ov_reg.bits.bucka_uv) status->is_uv_fault = true;
+    if (uv_ov_reg.bits.bucka_ov) status->is_ov_fault = true;
+    if (oc_reg.bits.bucka_oc)   status->is_oc_fault = true;
+    if (temp_reg.bits.pmic_temp_warning) status->is_ot_warning = true;
+    if (temp_reg.bits.pmic_temp_shutdown) status->is_ot_shutdown = true;
+    
+    return HAL_OK;
+}

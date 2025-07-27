@@ -1,0 +1,2 @@
+../Core/Src/pmic_mp5475.c:10:6:pmic_request_fault_read_dma	24	static
+../Core/Src/pmic_mp5475.c:19:6:pmic_i2c_dma_rx_callback_handler	32	static
