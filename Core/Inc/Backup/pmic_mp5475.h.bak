@@ -5,76 +5,56 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-// Slave Address 매크로 정의
-#define PMIC_SLAVE_ADDRESS 0x60
+#define PMIC_SLAVE_ADDRESS (0x60<<1)
 
-// Register Address enum 정의
 typedef enum {
     REGISTER_UV_OV_STATUS = 0x07,
-    REGISTER_OC_STATUS = 0x08,
-    REGISTER_TEMP_STATUS = 0x09   
+    REGISTER_OC_STATUS    = 0x08,
+    REGISTER_TEMP_STATUS  = 0x09
 } PmicRegisterAddress;
 
-//  union과 비트필드를 이용한 자료구조 정의, #pragma pack 사용
 #pragma pack(push, 1)
+
+// UV/OV 상태 레지스터
 typedef union {
     uint8_t raw;
     struct {
-        uint8_t buckd_ov : 1;
-        uint8_t buckc_ov : 1;
-        uint8_t buckb_ov : 1;
-        uint8_t bucka_ov : 1;
-        uint8_t buckd_uv : 1;
-        uint8_t buckc_uv : 1;
-        uint8_t buckb_uv : 1;
-        uint8_t bucka_uv : 1;
+        uint8_t buckd_ov : 1; uint8_t buckc_ov : 1; uint8_t buckb_ov : 1;
+        uint8_t bucka_ov : 1; uint8_t buckd_uv : 1; uint8_t buckc_uv : 1;
+        uint8_t buckb_uv : 1; uint8_t bucka_uv : 1;
     } bits;
 } RegisterUvOvStatus;
-#pragma pack(pop)
 
-
+// OC 상태 레지스터
 typedef union {
     uint8_t raw;
     struct {
-        uint8_t buckd_oc_warning : 1;
-        uint8_t buckc_oc_warning : 1;
-        uint8_t buckb_oc_warning : 1;
-        uint8_t bucka_oc_warning : 1;
-        uint8_t buckd_oc : 1;
-        uint8_t buckc_oc : 1;
-        uint8_t buckb_oc : 1;
-        uint8_t bucka_oc : 1;
+        uint8_t buckd_oc_warning : 1; uint8_t buckc_oc_warning : 1;
+        uint8_t buckb_oc_warning : 1; uint8_t bucka_oc_warning : 1;
+        uint8_t buckd_oc : 1; uint8_t buckc_oc : 1;
+        uint8_t buckb_oc : 1; uint8_t bucka_oc : 1;
     } bits;
 } RegisterOcStatus;
 
+// 시스템 상태 레지스터
 typedef union {
     uint8_t raw;
     struct {
-        uint8_t pmic_temp_shutdown : 1;
-        uint8_t pmic_temp_warning : 1;
-        uint8_t vdrv_ov : 1;
-        uint8_t vbulk_ov : 1;
-        uint8_t vr_fault : 1;
-        uint8_t ldo1v1_fault : 1;
-        uint8_t ldo1v8_fault : 1;
-        uint8_t reserved : 1;
+        uint8_t pmic_temp_shutdown : 1; uint8_t pmic_temp_warning : 1;
+        uint8_t vdrv_ov : 1; uint8_t vbulk_ov : 1;
+        uint8_t vr_fault : 1; uint8_t ldo1v1_fault : 1;
+        uint8_t ldo1v8_fault : 1; uint8_t reserved : 1;
     } bits;
 } RegisterSystemStatus;
 
-typedef struct {
-    bool is_uv_fault;
-    bool is_ov_fault;
-    bool is_oc_fault;
-    bool is_ot_warning; 
-    bool is_ot_shutdown;
-} PmicFaultStatus;
+#pragma pack(pop)
 
-
-/**
- * @brief PMIC의 모든 주요 Fault 상태를 읽어와 구조체에 담아 반환합니다.
- * @param status [out] Fault 상태를 저장할 PmicFaultStatus 구조체의 포인터
- * @return HAL_StatusTypeDef I2C 통신 성공 여부
- */
-HAL_StatusTypeDef pmic_get_all_faults(PmicFaultStatus *status);
+void StartI2CTask(void *argument);           // FreeRTOS task
+void pmic_request_fault_read_dma(void);      // DMA 읽기 함수
+void pmic_i2c_dma_rx_callback_handler(void); // DMA 완료 콜백
 
 #endif /* PMIC_MP5475_H */
+
+
+
+

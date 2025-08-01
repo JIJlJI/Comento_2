@@ -1,0 +1,4 @@
+../Core/Src/CAN_task.c:19:6:CAN_Init	8	static
+../Core/Src/CAN_task.c:25:6:CAN_RxCallback	16	static
+../Core/Src/CAN_task.c:31:6:Process_CAN_Response	56	static
+../Core/Src/CAN_task.c:66:6:CAN_StartTask	24	static

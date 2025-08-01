@@ -1,151 +1,169 @@
 #include "eeprom_25lc256.h"
-#include "main.h" // HAL 드라이버와 SPI 핸들을 사용하기 위해 필수
+#include "cmsis_os.h"
+#include <string.h>
+#include <stdio.h>
 
-// main.c에 자동으로 생성된 SPI1 핸들 변수를 사용하겠다고 선언
 extern SPI_HandleTypeDef hspi1;
+extern osSemaphoreId_t spiTxDoneSemaphoreHandle;
 
-// CubeMX에서 EEPROM의 CS핀을 GPIO_Output으로 설정했다고 가정 (예: PA4)
-#define EEPROM_CS_PORT  GPIOA
-#define EEPROM_CS_PIN   GPIO_PIN_4
+// 전역 변수
+DTC_Table_t DTC_Table = { 0x1234, "Brake UV Fault", 0 };
 
-// 25LC256 EEPROM 명령어
-#define EEPROM_WREN_CMD  0x06 // 쓰기 활성화 (Write Enable)
-#define EEPROM_WRITE_CMD 0x02 // 쓰기 (Write)
-#define EEPROM_READ_CMD  0x03 // 읽기 (Read)
-#define EEPROM_RDSR_CMD  0x05 // 상태 레지스터 읽기 (Read Status Register)
+// CS 핀 제어 (CS핀이 low일때만 명령을 받음)
+static void eeprom_cs_select(void) { HAL_GPIO_WritePin(GPIOB, GPIO_PIN_2, GPIO_PIN_RESET); }
+static void eeprom_cs_deselect(void) { HAL_GPIO_WritePin(GPIOB, GPIO_PIN_2, GPIO_PIN_SET); }
 
-// 상태 레지스터의 WIP(Write-In-Progress) 비트 마스크
-#define WIP_BIT_MASK 0x01
+// Status Register 읽기 (WIP 확인용. 반환된 값의 Bit0을 확인하여 쓰기 중인지 확인할 수 있음)
+static uint8_t eeprom_read_status(void) {
+    uint8_t cmd = EEPROM_CMD_RDSR;
+    uint8_t status = 0;
 
-// DMA 전송 완료를 확인하기 위한 플래그
-// volatile 키워드는 컴파일러 최적화로 인해 변수가 무시되는 것을 방지합니다.
-volatile bool spi_tx_complete = false;
-volatile bool spi_rx_complete = false;
+    eeprom_cs_select();
+    HAL_SPI_Transmit(&hspi1, &cmd, 1, HAL_MAX_DELAY);
+    HAL_SPI_Receive(&hspi1, &status, 1, HAL_MAX_DELAY);
+    eeprom_cs_deselect();
 
-// HAL 라이브러리가 SPI DMA 송신을 완료하면 이 함수를 자동으로 호출합니다.
-void HAL_SPI_TxCpltCallback(SPI_HandleTypeDef *hspi)
-{
-    // 여러 SPI를 사용할 경우를 대비하여, hspi1에 대한 콜백인지 확인
-    if (hspi->Instance == SPI1) {
-        spi_tx_complete = true;
+    return status;
+}
+
+// WIP(Bit0)이 0이 될 때까지 대기
+static void eeprom_wait_until_ready(void) {
+    while (eeprom_read_status() & 0x01) {   // 쓰기 중인지 계속 확인. status가 0이 되어야 EEPROM이 준비 완료. 다음작업을 수행함
+        osDelay(1);
     }
 }
 
-// HAL 라이브러리가 SPI DMA 수신을 완료하면 이 함수를 자동으로 호출합니다.
-void HAL_SPI_RxCpltCallback(SPI_HandleTypeDef *hspi)
-{
-    if (hspi->Instance == SPI1) {
-        spi_rx_complete = true;
-    }
-}
-
-// SPI 통신을 시작할 때 CS 핀을 Low로 내리는 함수
-static void eeprom_cs_select(void) {
-    HAL_GPIO_WritePin(EEPROM_CS_PORT, EEPROM_CS_PIN, GPIO_PIN_RESET);
-}
-// SPI 통신을 끝낼 때 CS 핀을 High로 올리는 함수
-static void eeprom_cs_deselect(void) {
-    HAL_GPIO_WritePin(EEPROM_CS_PORT, EEPROM_CS_PIN, GPIO_PIN_SET);
-}
-
-// EEPROM에 쓰기 작업을 하기 전에 반드시 호출해야 하는 함수
+// WREN 실행. EEPROM은 쓰기 가능 상태(WEL=1) 로 만들어야만 데이터를 쓸 수 있음->쓰기 전 WREN 명령을 보내줌
 static void eeprom_write_enable(void) {
+    uint8_t cmd = EEPROM_CMD_WREN;
+    eeprom_cs_select();
+    HAL_SPI_Transmit(&hspi1, &cmd, 1, HAL_MAX_DELAY);
+    eeprom_cs_deselect();
+}
+
+// 바이트 쓰기 (DMA 사용)
+static void eeprom_write_bytes(uint16_t address, uint8_t* data, uint16_t size) {
+    uint8_t header[3];
     uint8_t wren_cmd = EEPROM_WREN_CMD;
+
+    // WREN 명령어 전송 (쓰기 활성화)
     eeprom_cs_select();
-    HAL_SPI_Transmit(&hspi1, &wren_cmd, 1, 100); // WREN은 간단하므로 Polling 방식 사용
+    HAL_SPI_Transmit(&hspi1, &wren_cmd, 1, 100);
+    eeprom_cs_deselect();
+    osDelay(5);
+
+    // WRITE 명령어, 쓰기 시작 주소 설정
+    header[0] = EEPROM_WRITE_CMD;
+    header[1] = (address >> 8) & 0xFF;  // 상위 8비트만 남기고 나머지 비트 제거
+    header[2] = address & 0xFF;         // 하위 8비트만 남김
+
+    // DMA로 명령어, 주소 전송
+    eeprom_cs_select();
+    HAL_SPI_Transmit_DMA(&hspi1, header, 3);
+    osSemaphoreAcquire(spiTxDoneSemaphoreHandle, 100);  // DMA 완료 기다림
+
+    // DMA로 실제 데이터 전송
+    HAL_SPI_Transmit_DMA(&hspi1, data, size);
+    osSemaphoreAcquire(spiTxDoneSemaphoreHandle, 100);  // DMA 완료 기다림
+    eeprom_cs_deselect();
+
+    // EEPROM이 내부적으로 데이터를 다 쓸 때까지 대기
+    osDelay(5);
+}
+
+// 바이트 읽기 (Polling) (읽기의 경우 데이터가 작아 polling이 간단)
+static void eeprom_read_bytes(uint16_t address, uint8_t *data, uint16_t size) {
+    uint8_t header[3] = {
+        EEPROM_CMD_READ,
+        (uint8_t)(address >> 8),
+        (uint8_t)(address & 0xFF)
+    };
+
+    eeprom_cs_select();
+    HAL_SPI_Transmit(&hspi1, header, 3, HAL_MAX_DELAY);
+    HAL_SPI_Receive(&hspi1, data, size, HAL_MAX_DELAY);
     eeprom_cs_deselect();
 }
 
-// EEPROM 내부 쓰기 작업이 끝날 때까지 기다리는 함수
-static void eeprom_wait_for_write_complete(void) {
-    uint8_t read_status_cmd = EEPROM_RDSR_CMD;
-    uint8_t status_reg;
-    
-    eeprom_cs_select();
-    HAL_SPI_Transmit(&hspi1, &read_status_cmd, 1, 100);
-    do {
-        HAL_SPI_Receive(&hspi1, &status_reg, 1, 100);
-    } while (status_reg & WIP_BIT_MASK); // WIP 비트가 0이 될 때까지 반복
-    eeprom_cs_deselect();
+
+
+// DTC_Table을 EEPROM에 기록
+void EEPROM_WriteDTC(void) {
+    eeprom_write_bytes(EEPROM_DTC_ADDR, (uint8_t*)&DTC_Table, sizeof(DTC_Table));
 }
 
-// [요구사항 2] SPI DMA 방식을 사용하여 32비트 데이터 쓰기
-bool eeprom_write_32bit(uint16_t address, uint32_t data)
-{
-    uint8_t tx_buffer[7]; // 명령어(1) + 주소(2) + 데이터(4)
+// EEPROM에서 DTC_Table 읽기
+void EEPROM_ReadDTC(void) {
+    eeprom_read_bytes(EEPROM_DTC_ADDR, (uint8_t*)&DTC_Table, sizeof(DTC_Table));
+}
 
-    eeprom_write_enable();
-    HAL_Delay(5); // WREN 후 최소한의 대기 시간
+// 새로운 DTC 추가 (중복 방지)
+bool EEPROM_LogNewDTC(uint32_t dtc_code) {
+    uint8_t buffer[4];               //DTC 코드 저장공간
+    uint16_t write_address = 0xFFFF; // 새 코드 저장 주소
+    bool already_exists = false;
 
-    tx_buffer[0] = EEPROM_WRITE_CMD;
-    tx_buffer[1] = (address >> 8) & 0xFF;
-    tx_buffer[2] = address & 0xFF;
-    tx_buffer[3] = (data >> 24) & 0xFF;
-    tx_buffer[4] = (data >> 16) & 0xFF;
-    tx_buffer[5] = (data >> 8) & 0xFF;
-    tx_buffer[6] = data & 0xFF;
+    for (int i = 0; i < 32; i++) { // DTC_MAX_COUNT = 32 가정
+        uint16_t addr = EEPROM_DTC_ADDR + sizeof(DTC_Table) + (i * 4);  // eeprom에서의 주소 계산. 기본 시작 주소 + dtc 테이블 크기 + 각 코드*4(각코드는 4byte)
+        eeprom_read_bytes(addr, buffer, 4);    // addr 주소에서 4바이트 읽어서 buffer에 저장
 
-    spi_tx_complete = false; // DMA 완료 플래그 초기화
-    eeprom_cs_select();
+        uint32_t existing_dtc =        //읽은 데이터를 32비트로 조립
+            ((uint32_t)buffer[0] << 24) |
+            ((uint32_t)buffer[1] << 16) |
+            ((uint32_t)buffer[2] << 8)  |
+            (uint32_t)buffer[3];
 
-    if (HAL_SPI_Transmit_DMA(&hspi1, tx_buffer, 7) != HAL_OK) {
-        eeprom_cs_deselect();
-        return false; // DMA 시작 실패
-    }
-
-    // DMA 전송이 완료될 때까지 대기 (타임아웃 100ms)
-    uint32_t start_tick = HAL_GetTick();
-    while(spi_tx_complete == false) {
-        if(HAL_GetTick() - start_tick > 100) {
-            eeprom_cs_deselect();
-            return false;
+        if (existing_dtc == dtc_code) {          // 중복여부 호가인
+            already_exists = true;
+            break;
+        }
+        if (write_address == 0xFFFF && existing_dtc == 0xFFFFFFFF) {    // 빈공간찾기. 읽은 값이 모두 1이면 빈공간, 주소가 모두 1이면 아직 주소를 찾지 못함.
+            write_address = addr;
         }
     }
 
-    eeprom_cs_deselect();
-    eeprom_wait_for_write_complete(); // EEPROM의 내부 쓰기 사이클 대기
+    if (already_exists) return true;
+    if (write_address == 0xFFFF) {
+        printf("[EEPROM] Log area full\r\n");
+        return false;
+    }
 
+    buffer[0] = (dtc_code >> 24) & 0xFF;    // dtc를 4바이트로 분해해서 버퍼에 넣음
+    buffer[1] = (dtc_code >> 16) & 0xFF;
+    buffer[2] = (dtc_code >> 8) & 0xFF;
+    buffer[3] = dtc_code & 0xFF;
+
+    eeprom_write_bytes(write_address, buffer, 4);
     return true;
 }
 
-// [요구사항 2] SPI DMA 방식을 사용하여 32비트 데이터 읽기
-uint32_t eeprom_read_32bit(uint16_t address)
-{
-    uint8_t header[3];
-    uint8_t data_bytes[4] = {0};
-    uint32_t read_data = 0;
+// 모든 DTC 읽기
+uint8_t EEPROM_ReadAllDTCs(uint32_t *dtc_buffer) {
+    uint8_t count = 0;
+    uint8_t buf[4];
 
-    header[0] = EEPROM_READ_CMD;
-    header[1] = (address >> 8) & 0xFF;
-    header[2] = address & 0xFF;
+    for (int i = 0; i < 32; i++) {
+        uint16_t addr = EEPROM_DTC_ADDR + sizeof(DTC_Table) + (i * 4);
+        eeprom_read_bytes(addr, buf, 4);
 
-    spi_rx_complete = false; // DMA 완료 플래그 초기화
+        uint32_t dtc =
+            ((uint32_t)buf[0] << 24) |
+            ((uint32_t)buf[1] << 16) |
+            ((uint32_t)buf[2] << 8)  |
+            (uint32_t)buf[3];
 
-    eeprom_cs_select();
-    // 헤더(명령어+주소)는 Polling 방식으로 먼저 전송
-    HAL_SPI_Transmit(&hspi1, header, 3, 100);
-
-    // 데이터 수신은 DMA 방식으로 시작
-    if (HAL_SPI_Receive_DMA(&hspi1, data_bytes, 4) != HAL_OK) {
-        eeprom_cs_deselect();
-        return 0; // DMA 시작 실패
-    }
-
-    // DMA 수신이 완료될 때까지 대기 (타임아웃 100ms)
-    uint32_t start_tick = HAL_GetTick();
-    while(spi_rx_complete == false) {
-        if(HAL_GetTick() - start_tick > 100) {
-            eeprom_cs_deselect();
-            return 0;
+        if (dtc != 0xFFFFFFFF) {
+            dtc_buffer[count++] = dtc;
         }
     }
-    eeprom_cs_deselect();
+    return count;
+}
 
-    // 수신된 4바이트 데이터를 32비트 변수로 조합
-    read_data = ((uint32_t)data_bytes[0] << 24) |
-                ((uint32_t)data_bytes[1] << 16) |
-                ((uint32_t)data_bytes[2] << 8)  |
-                ((uint32_t)data_bytes[3]);
-
-    return read_data;
+// 모든 DTC 초기화
+void EEPROM_ClearAllDTCs(void) {
+    uint8_t empty[4] = { 0xFF, 0xFF, 0xFF, 0xFF };
+    for (int i = 0; i < 32; i++) {
+        uint16_t addr = EEPROM_DTC_ADDR + sizeof(DTC_Table) + (i * 4);
+        eeprom_write_bytes(addr, empty, 4);
+    }
 }

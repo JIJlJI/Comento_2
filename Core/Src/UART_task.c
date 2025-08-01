@@ -1,0 +1,34 @@
+/*
+ * UART_task.c
+ *
+ *  Created on: Jul 31, 2025
+ *      Author: pythonjihyun
+ */
+
+#include "UART_task.h"
+#include "cmsis_os.h"
+#include "main.h"
+#include "eeprom_25lc256.h"
+#include <stdio.h>
+#include <string.h>
+
+extern UART_HandleTypeDef huart2;
+extern osMutexId_t CommMutexHandleHandle;
+
+void UART_StartTask(void *argument) {
+    char msg[80];
+
+    for(;;) {
+        osMutexAcquire(CommMutexHandleHandle, osWaitForever);
+
+        // DTC 상태를 UART로 출력
+        snprintf(msg, sizeof(msg), "[ECU] DTC: 0x%04X Active:%d\r\n",
+                 DTC_Table.DTC_Code, DTC_Table.active);
+
+        HAL_UART_Transmit(&huart2, (uint8_t*)msg, strlen(msg), HAL_MAX_DELAY);
+
+        osMutexRelease(CommMutexHandleHandle);
+        osDelay(1000);  // 1초마다 출력
+    }
+}
+

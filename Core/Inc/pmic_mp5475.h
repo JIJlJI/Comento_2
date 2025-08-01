@@ -5,7 +5,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-#define PMIC_SLAVE_ADDRESS 0x60
+#define PMIC_SLAVE_ADDRESS (0x60<<1)
 
 typedef enum {
     REGISTER_UV_OV_STATUS = 0x07,
@@ -15,6 +15,7 @@ typedef enum {
 
 #pragma pack(push, 1)
 
+// UV/OV 상태 레지스터
 typedef union {
     uint8_t raw;
     struct {
@@ -24,6 +25,7 @@ typedef union {
     } bits;
 } RegisterUvOvStatus;
 
+// OC 상태 레지스터
 typedef union {
     uint8_t raw;
     struct {
@@ -34,6 +36,7 @@ typedef union {
     } bits;
 } RegisterOcStatus;
 
+// 시스템 상태 레지스터
 typedef union {
     uint8_t raw;
     struct {
@@ -46,8 +49,10 @@ typedef union {
 
 #pragma pack(pop)
 
-void pmic_request_fault_read_dma(void);
-void pmic_i2c_dma_rx_callback_handler(void);
+void StartI2CTask(void *argument);           // FreeRTOS task
+void pmic_request_fault_read_dma(void);      // DMA 읽기 함수
+void pmic_i2c_dma_rx_callback_handler(void); // DMA 완료 콜백
+void pmic_set_vout(uint8_t register_addr, uint8_t vout_value);
 
 #endif /* PMIC_MP5475_H */
 

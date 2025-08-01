@@ -5,16 +5,6 @@
   * @brief          : Header for main.c file.
   *                   This file contains the common defines of the application.
   ******************************************************************************
-  * @attention
-  *
-  * Copyright (c) 2025 STMicroelectronics.
-  * All rights reserved.
-  *
-  * This software is licensed under terms that can be found in the LICENSE file
-  * in the root directory of this software component.
-  * If no LICENSE file comes with this software, it is provided AS-IS.
-  *
-  ******************************************************************************
   */
 /* USER CODE END Header */
 
@@ -36,6 +26,25 @@ extern "C" {
 
 /* Exported types ------------------------------------------------------------*/
 /* USER CODE BEGIN ET */
+
+// 메시지 큐를 통해 전달될 이벤트의 종류
+typedef enum {
+    DTC_EVENT_WRITE,      // 새로운 DTC를 쓰라는 명령
+    DTC_EVENT_READ_ALL,   // 저장된 모든 DTC를 읽으라는 명령 (CAN 요청)
+    DTC_EVENT_CLEAR_ALL   // 모든 DTC를 지우라는 명령 (CAN 요청)
+} DtcCommand_t;
+
+// 메시지 큐를 통해 전달될 이벤트 데이터 구조체
+typedef struct {
+    DtcCommand_t command;
+    uint32_t     dtc_code; // DTC_EVENT_WRITE 일 때만 유효한 데이터
+} DtcEvent_t;
+
+// 비동기 처리를 위한 상태 머신(State Machine) enum
+typedef enum {
+    I2C_STATE_IDLE,
+    I2C_STATE_READ_FAULTS_WAIT
+} I2C_State_t;
 
 /* USER CODE END ET */
 
@@ -59,7 +68,8 @@ void Error_Handler(void);
 /* Private defines -----------------------------------------------------------*/
 
 /* USER CODE BEGIN Private defines */
-
+#define EEPROM_CS_PORT  GPIOA
+#define EEPROM_CS_PIN   GPIO_PIN_4
 /* USER CODE END Private defines */
 
 #ifdef __cplusplus
@@ -67,3 +77,6 @@ void Error_Handler(void);
 #endif
 
 #endif /* __MAIN_H */
+
+
+

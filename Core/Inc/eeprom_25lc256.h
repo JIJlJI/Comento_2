@@ -4,12 +4,28 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-#define DTC_MAX_COUNT 10
-#define DTC_AREA_START_ADDRESS 100
+
+#define EEPROM_WREN_CMD   0x06 // 쓰기 가능 상태로 만듦
+#define EEPROM_WRITE_CMD  0x02 // 데이터를 EEPROM에 쓰는 명령
+#define EEPROM_READ_CMD   0x03
+#define EEPROM_CMD_RDSR   0x05
+
+#define EEPROM_DTC_ADDR   0x0000  // DTC 데이터를 저장할 시작 주소
+
+// DTC 데이터 구조체
+typedef struct {
+    uint16_t DTC_Code;       // 고장 코드
+    char Description[50];    // 설명 문자열
+    uint8_t active;          // 활성화 상태
+} DTC_Table_t;
+
+extern DTC_Table_t DTC_Table;   // 다른 파일에서도 DTC_Table 변수를 사용할 수 있도록 extern 선언
 
 
-bool eeprom_log_new_dtc(uint32_t dtc_code);
-uint8_t eeprom_read_all_dtcs(uint32_t* dtc_buffer);
-void eeprom_clear_all_dtcs(void);
+void EEPROM_WriteDTC(void);
+void EEPROM_ReadDTC(void);
+bool EEPROM_LogNewDTC(uint32_t dtc_code);
+uint8_t EEPROM_ReadAllDTCs(uint32_t *dtc_buffer);
+void EEPROM_ClearAllDTCs(void);
 
 #endif /* EEPROM_25LC256_H */

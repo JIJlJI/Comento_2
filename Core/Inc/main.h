@@ -46,6 +46,15 @@ typedef enum {
     I2C_STATE_READ_FAULTS_WAIT
 } I2C_State_t;
 
+// 시스템의 전체 동작 상태 관리
+typedef enum {
+    SYS_STATE_INIT,         // 초기화 상태
+    SYS_STATE_IDLE,         // 대기 상태 (브레이크 OFF)
+    SYS_STATE_BRAKING,      // 브레이크 작동 중인 상태
+    SYS_STATE_FAULT,        // 오류 발생 상태
+    SYS_STATE_DOWNLOAD_READY// 다운로드 준비/실행 상태
+} SystemState_t;
+
 /* USER CODE END ET */
 
 /* Exported constants --------------------------------------------------------*/
@@ -77,6 +86,3 @@ void Error_Handler(void);
 #endif
 
 #endif /* __MAIN_H */
-
-
-

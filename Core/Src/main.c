@@ -14,13 +14,14 @@
 /* USER CODE BEGIN Includes */
 #include "pmic_mp5475.h"
 #include "eeprom_25lc256.h"
+#include "CAN_task.h"
+#include "UART_task.h"
 #include <stdio.h>
 #include <string.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
-
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
@@ -29,45 +30,61 @@
 
 /* Private macro -------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
-
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
 CAN_HandleTypeDef hcan1;
-I2C_HandleTypeDef hi2c1;
-SPI_HandleTypeDef hspi1;
-UART_HandleTypeDef huart2;
-DMA_HandleTypeDef hdma_i2c1_rx;
-DMA_HandleTypeDef hdma_spi1_tx;
 
+I2C_HandleTypeDef hi2c1;
+
+SPI_HandleTypeDef hspi1;
+
+UART_HandleTypeDef huart2;
+
+/* Definitions for defaultTask */
+osThreadId_t defaultTaskHandle;
+const osThreadAttr_t defaultTask_attributes = {
+  .name = "defaultTask",
+  .stack_size = 128 * 4,
+  .priority = (osPriority_t) osPriorityNormal,
+};
 /* USER CODE BEGIN PV */
 osThreadId_t i2cMonitorTaskHandle;
 osThreadId_t spiEepromTaskHandle;
-osThreadId_t uartMonitorTaskHandle;
+osThreadId_t dtcTaskhandle;
+osThreadId_t canTaskHandle;
+osThreadId_t uartTaskHandle;
+
 osMutexId_t eepromMutexHandle;
 osSemaphoreId_t i2cRxDoneSemaphoreHandle;
 osSemaphoreId_t spiTxDoneSemaphoreHandle;
 osSemaphoreId_t canTxDoneSemaphoreHandle;
+osMessageQueueId_t CanQueueHandle;
+osMutexId_t CommMutexHandleHandle;
 osMessageQueueId_t dtcProcessingQueueHandle;
+osMessageQueueId_t dtcQueueHandle;
 
+
+volatile SystemState_t g_SystemState = SYS_STATE_INIT;
 volatile I2C_State_t g_i2c_state = I2C_STATE_IDLE;
+
 uint8_t g_i2c_rx_buffer[3];
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
-static void MX_DMA_Init(void);
+static void MX_CAN1_Init(void);
 static void MX_I2C1_Init(void);
 static void MX_SPI1_Init(void);
 static void MX_USART2_UART_Init(void);
-static void MX_CAN1_Init(void);
-void MX_FREERTOS_Init(void);
+void StartDefaultTask(void *argument);
+void Activate_Motor_And_Valve(void) { };
+void Deactivate_Motor_And_Valve(void) { };
 
 /* USER CODE BEGIN PFP */
-void I2cMonitorTask(void *argument);
-void SpiEepromTask(void *argument);
-void UartMonitorTask(void *argument);
+int __io_putchar(int ch);
+void MX_FREERTOS_Init(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -77,26 +94,17 @@ int __io_putchar(int ch) {
     return ch;
 }
 
+void BrakeControlTask(void *argument);
+void I2cMonitorTask(void *argument);
+void SpiEepromTask(void *argument);
+void DtcProcessingTask(void *argument);
 void HAL_I2C_ErrorCallback(I2C_HandleTypeDef *hi2c) { if (hi2c->Instance == I2C1) g_i2c_state = I2C_STATE_IDLE; }
 void HAL_I2C_MemRxCpltCallback(I2C_HandleTypeDef *hi2c) { if (hi2c->Instance == I2C1) pmic_i2c_dma_rx_callback_handler(); }
 void HAL_SPI_TxCpltCallback(SPI_HandleTypeDef *hspi) { if (hspi->Instance == SPI1) osSemaphoreRelease(spiTxDoneSemaphoreHandle); }
 void HAL_CAN_TxMailbox0CompleteCallback(CAN_HandleTypeDef *hcan) { osSemaphoreRelease(canTxDoneSemaphoreHandle); }
 void HAL_CAN_TxMailbox1CompleteCallback(CAN_HandleTypeDef *hcan) { osSemaphoreRelease(canTxDoneSemaphoreHandle); }
 void HAL_CAN_TxMailbox2CompleteCallback(CAN_HandleTypeDef *hcan) { osSemaphoreRelease(canTxDoneSemaphoreHandle); }
-void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan) {
-    CAN_RxHeaderTypeDef rxHeader;
-    uint8_t rxData[8];
-    DtcEvent_t event;
-    if (HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO0, &rxHeader, rxData) == HAL_OK) {
-        if (rxHeader.StdId == 0x7E0 && rxData[0] == 0x19) { // Read DTC
-             event.command = DTC_EVENT_READ_ALL;
-             osMessageQueuePut(dtcProcessingQueueHandle, &event, 0U, 0U);
-        } else if (rxHeader.StdId == 0x7E0 && rxData[0] == 0x14) { // Clear DTC
-             event.command = DTC_EVENT_CLEAR_ALL;
-             osMessageQueuePut(dtcProcessingQueueHandle, &event, 0U, 0U);
-        }
-    }
-}
+void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan) { CAN_RxCallback(hcan); }
 /* USER CODE END 0 */
 
 /**
@@ -105,8 +113,8 @@ void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan) {
   */
 int main(void)
 {
-  /* USER CODE BEGIN 1 */
 
+  /* USER CODE BEGIN 1 */
   /* USER CODE END 1 */
 
   /* MCU Configuration--------------------------------------------------------*/
@@ -115,41 +123,87 @@ int main(void)
   HAL_Init();
 
   /* USER CODE BEGIN Init */
-
   /* USER CODE END Init */
 
   /* Configure the system clock */
   SystemClock_Config();
 
   /* USER CODE BEGIN SysInit */
-
   /* USER CODE END SysInit */
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
-  MX_DMA_Init();
+  MX_CAN1_Init();
   MX_I2C1_Init();
   MX_SPI1_Init();
   MX_USART2_UART_Init();
-  MX_CAN1_Init();
   /* USER CODE BEGIN 2 */
   CAN_FilterTypeDef canfilterconfig = {0};
   canfilterconfig.FilterActivation = CAN_FILTER_ENABLE;
   canfilterconfig.FilterMode = CAN_FILTERMODE_IDMASK;
   HAL_CAN_ConfigFilter(&hcan1, &canfilterconfig);
-  HAL_CAN_Start(&hcan1);
-  HAL_CAN_ActivateNotification(&hcan1, CAN_IT_RX_FIFO0_MSG_PENDING);
-  printf("ECU System Initialized (Advanced Arch).\r\n");
+
+  CAN_Init();           // CAN 시작 + 인터럽트 활성화
+  EEPROM_ReadDTC();     // 부팅 시 EEPROM에서 DTC 복원
+  printf("ECU System Initialized.\r\n");
   /* USER CODE END 2 */
 
   /* Init scheduler */
-  osKernelInitialize();   //  RTOS 커널을 초기화
+  osKernelInitialize();
 
-  /* Call init function for freertos objects (in freertos.c) */
-  MX_FREERTOS_Init();
+  /* USER CODE BEGIN RTOS_MUTEX */
+  eepromMutexHandle = osMutexNew(NULL);
+  /* USER CODE END RTOS_MUTEX */
+
+  /* USER CODE BEGIN RTOS_SEMAPHORES */
+  i2cRxDoneSemaphoreHandle = osSemaphoreNew(1, 0, NULL);
+  spiTxDoneSemaphoreHandle = osSemaphoreNew(1, 0, NULL);
+  canTxDoneSemaphoreHandle = osSemaphoreNew(1, 0, NULL);
+  /* USER CODE END RTOS_SEMAPHORES */
+
+  /* USER CODE BEGIN RTOS_TIMERS */
+  /* start timers, add new ones, ... */
+  /* USER CODE END RTOS_TIMERS */
+
+  /* USER CODE BEGIN RTOS_QUEUES */
+  CanQueueHandle = osMessageQueueNew(8, sizeof(uint8_t[8]), NULL);
+  dtcProcessingQueueHandle = osMessageQueueNew(8, sizeof(DtcEvent_t), NULL);
+  dtcQueueHandle = osMessageQueueNew(8, sizeof(uint32_t), NULL);
+
+
+  /* USER CODE END RTOS_QUEUES */
+
+  /* Create the thread(s) */
+  /* creation of defaultTask */
+  defaultTaskHandle = osThreadNew(StartDefaultTask, NULL, &defaultTask_attributes);
+
+  /* USER CODE BEGIN RTOS_THREADS */
+  const osThreadAttr_t i2cAttr  = { .stack_size = 256 * 4, .priority = osPriorityHigh };     /// 우선순위 반영
+  const osThreadAttr_t spiAttr  = { .stack_size = 256 * 4, .priority = osPriorityAboveNormal };
+  const osThreadAttr_t dtcAttr = { .stack_size = 256 * 4, .priority = osPriorityAboveNormal };
+  const osThreadAttr_t canAttr  = { .stack_size = 256 * 4, .priority = osPriorityNormal };
+  const osThreadAttr_t uartAttr = { .stack_size = 256 * 4, .priority = osPriorityBelowNormal };
+  const osThreadAttr_t brakeCtrlAttr = { .name = "BrakeControl", .stack_size = 256 * 4, .priority = osPriorityHigh };
+
+
+  i2cMonitorTaskHandle = osThreadNew(I2cMonitorTask , NULL, &i2cAttr);
+  spiEepromTaskHandle  = osThreadNew(SpiEepromTask  , NULL, &spiAttr);
+  dtcTaskhandle 	   = osThreadNew(DtcProcessingTask, NULL, &dtcAttr);
+  canTaskHandle        = osThreadNew(CAN_StartTask, NULL, &canAttr);
+  uartTaskHandle       = osThreadNew(UART_StartTask, NULL, &uartAttr);
+  osThreadNew(BrakeControlTask, NULL, &brakeCtrlAttr);
+
+
+  /* USER CODE END RTOS_THREADS */
+
+  /* USER CODE BEGIN RTOS_EVENTS */
+  /* add events, ... */
+  /* USER CODE END RTOS_EVENTS */
 
   /* Start scheduler */
   osKernelStart();
+
+  /* We should never get here as control is now taken by the scheduler */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
@@ -171,36 +225,33 @@ void SystemClock_Config(void)
   RCC_OscInitTypeDef RCC_OscInitStruct = {0};
   RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
 
+  /** Configure the main internal regulator output voltage
+  */
   __HAL_RCC_PWR_CLK_ENABLE();
-  __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE1);
+  __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE3);
 
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
-  RCC_OscInitStruct.HSEState = RCC_HSE_ON;
-  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
-  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
-  RCC_OscInitStruct.PLL.PLLM = 4;
-  RCC_OscInitStruct.PLL.PLLN = 180;
-  RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;
-  RCC_OscInitStruct.PLL.PLLQ = 2;
-  RCC_OscInitStruct.PLL.PLLR = 2;
+  /** Initializes the RCC Oscillators according to the specified parameters
+  * in the RCC_OscInitTypeDef structure.
+  */
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
+  RCC_OscInitStruct.HSIState = RCC_HSI_ON;
+  RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
+  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_NONE;
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
   {
     Error_Handler();
   }
 
-  if (HAL_PWREx_EnableOverDrive() != HAL_OK)
-  {
-    Error_Handler();
-  }
-
+  /** Initializes the CPU, AHB and APB buses clocks
+  */
   RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
                               |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
-  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
+  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_HSI;
   RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
-  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV4;
-  RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV2;
+  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;
+  RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
 
-  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_5) != HAL_OK)
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_0) != HAL_OK)
   {
     Error_Handler();
   }
@@ -213,12 +264,20 @@ void SystemClock_Config(void)
   */
 static void MX_CAN1_Init(void)
 {
+
+  /* USER CODE BEGIN CAN1_Init 0 */
+
+  /* USER CODE END CAN1_Init 0 */
+
+  /* USER CODE BEGIN CAN1_Init 1 */
+
+  /* USER CODE END CAN1_Init 1 */
   hcan1.Instance = CAN1;
-  hcan1.Init.Prescaler = 18;
+  hcan1.Init.Prescaler = 16;
   hcan1.Init.Mode = CAN_MODE_NORMAL;
   hcan1.Init.SyncJumpWidth = CAN_SJW_1TQ;
-  hcan1.Init.TimeSeg1 = CAN_BS1_12TQ;
-  hcan1.Init.TimeSeg2 = CAN_BS2_2TQ;
+  hcan1.Init.TimeSeg1 = CAN_BS1_1TQ;
+  hcan1.Init.TimeSeg2 = CAN_BS2_1TQ;
   hcan1.Init.TimeTriggeredMode = DISABLE;
   hcan1.Init.AutoBusOff = DISABLE;
   hcan1.Init.AutoWakeUp = DISABLE;
@@ -229,13 +288,27 @@ static void MX_CAN1_Init(void)
   {
     Error_Handler();
   }
+  /* USER CODE BEGIN CAN1_Init 2 */
+
+  /* USER CODE END CAN1_Init 2 */
+
 }
 
 /**
   * @brief I2C1 Initialization Function
+  * @param None
+  * @retval None
   */
 static void MX_I2C1_Init(void)
 {
+
+  /* USER CODE BEGIN I2C1_Init 0 */
+
+  /* USER CODE END I2C1_Init 0 */
+
+  /* USER CODE BEGIN I2C1_Init 1 */
+
+  /* USER CODE END I2C1_Init 1 */
   hi2c1.Instance = I2C1;
   hi2c1.Init.ClockSpeed = 100000;
   hi2c1.Init.DutyCycle = I2C_DUTYCYCLE_2;
@@ -249,13 +322,28 @@ static void MX_I2C1_Init(void)
   {
     Error_Handler();
   }
+  /* USER CODE BEGIN I2C1_Init 2 */
+
+  /* USER CODE END I2C1_Init 2 */
+
 }
 
 /**
   * @brief SPI1 Initialization Function
+  * @param None
+  * @retval None
   */
 static void MX_SPI1_Init(void)
 {
+
+  /* USER CODE BEGIN SPI1_Init 0 */
+
+  /* USER CODE END SPI1_Init 0 */
+
+  /* USER CODE BEGIN SPI1_Init 1 */
+
+  /* USER CODE END SPI1_Init 1 */
+  /* SPI1 parameter configuration*/
   hspi1.Instance = SPI1;
   hspi1.Init.Mode = SPI_MODE_MASTER;
   hspi1.Init.Direction = SPI_DIRECTION_2LINES;
@@ -263,7 +351,7 @@ static void MX_SPI1_Init(void)
   hspi1.Init.CLKPolarity = SPI_POLARITY_LOW;
   hspi1.Init.CLKPhase = SPI_PHASE_1EDGE;
   hspi1.Init.NSS = SPI_NSS_SOFT;
-  hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_16;
+  hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_2;
   hspi1.Init.FirstBit = SPI_FIRSTBIT_MSB;
   hspi1.Init.TIMode = SPI_TIMODE_DISABLE;
   hspi1.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
@@ -272,13 +360,27 @@ static void MX_SPI1_Init(void)
   {
     Error_Handler();
   }
+  /* USER CODE BEGIN SPI1_Init 2 */
+
+  /* USER CODE END SPI1_Init 2 */
+
 }
 
 /**
   * @brief USART2 Initialization Function
+  * @param None
+  * @retval None
   */
 static void MX_USART2_UART_Init(void)
 {
+
+  /* USER CODE BEGIN USART2_Init 0 */
+
+  /* USER CODE END USART2_Init 0 */
+
+  /* USER CODE BEGIN USART2_Init 1 */
+
+  /* USER CODE END USART2_Init 1 */
   huart2.Instance = USART2;
   huart2.Init.BaudRate = 115200;
   huart2.Init.WordLength = UART_WORDLENGTH_8B;
@@ -291,113 +393,116 @@ static void MX_USART2_UART_Init(void)
   {
     Error_Handler();
   }
-}
+  /* USER CODE BEGIN USART2_Init 2 */
 
-/**
-  * Enable DMA controller clock
-  */
-static void MX_DMA_Init(void)
-{
-  __HAL_RCC_DMA1_CLK_ENABLE();
-  HAL_NVIC_SetPriority(DMA1_Stream0_IRQn, 5, 0);
-  HAL_NVIC_EnableIRQ(DMA1_Stream0_IRQn);
-  HAL_NVIC_SetPriority(DMA1_Stream5_IRQn, 5, 0);
-  HAL_NVIC_EnableIRQ(DMA1_Stream5_IRQn);
+  /* USER CODE END USART2_Init 2 */
+
 }
 
 /**
   * @brief GPIO Initialization Function
+  * @param None
+  * @retval None
   */
 static void MX_GPIO_Init(void)
 {
-  GPIO_InitTypeDef GPIO_InitStruct = {0};
-  __HAL_RCC_GPIOC_CLK_ENABLE();
-  __HAL_RCC_GPIOH_CLK_ENABLE();
+  /* USER CODE BEGIN MX_GPIO_Init_1 */
+
+  /* USER CODE END MX_GPIO_Init_1 */
+
+  /* GPIO Ports Clock Enable */
   __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
-  HAL_GPIO_WritePin(EEPROM_CS_PORT, EEPROM_CS_PIN, GPIO_PIN_SET);
-  GPIO_InitStruct.Pin = EEPROM_CS_PIN;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(EEPROM_CS_PORT, &GPIO_InitStruct);
+  /* USER CODE BEGIN MX_GPIO_Init_2 */
+
+  /* USER CODE END MX_GPIO_Init_2 */
 }
 
 /* USER CODE BEGIN 4 */
-void MX_FREERTOS_Init(void) {
-  eepromMutexHandle = osMutexNew(NULL);
-  i2cRxDoneSemaphoreHandle = osSemaphoreNew(1, 0, NULL);
-  spiTxDoneSemaphoreHandle = osSemaphoreNew(1, 0, NULL);
-  canTxDoneSemaphoreHandle = osSemaphoreNew(1, 0, NULL);
-  dtcProcessingQueueHandle = osMessageQueueNew(8, sizeof(DtcEvent_t), NULL);
-
-  const osThreadAttr_t defaultTaskAttr = { .name = "DefaultTask", .stack_size = 256 * 4 };
-  i2cMonitorTaskHandle = osThreadNew(I2cMonitorTask, NULL, &defaultTaskAttr);
-  spiEepromTaskHandle = osThreadNew(SpiEepromTask, NULL, &defaultTaskAttr);
-  uartMonitorTaskHandle = osThreadNew(UartMonitorTask, NULL, &defaultTaskAttr);
-}
-
 void I2cMonitorTask(void *argument) {
   for(;;) {
-    pmic_request_fault_read_dma();
+    pmic_request_fault_read_dma();   // PMIC 상태를 DMA로 읽기
     osDelay(200);
   }
 }
 
 void SpiEepromTask(void *argument) {
-  DtcEvent_t event;
-  uint32_t dtc_buffer[DTC_MAX_COUNT];
-  CAN_TxHeaderTypeDef txHeader;
-  uint8_t txData[8];
-  uint32_t txMailbox;
-
   for(;;) {
-    if (osMessageQueueGet(dtcProcessingQueueHandle, &event, NULL, osWaitForever) == osOK) {
-        osMutexAcquire(eepromMutexHandle, osWaitForever);    // Mutex획득해서 다른작업의 접근 제한
-        switch(event.command) {
-            case DTC_EVENT_WRITE:
-                printf("[SPI Task] Logging DTC: 0x%lX\r\n", event.dtc_code);
-                eeprom_log_new_dtc(event.dtc_code);    // DTC코드를 저장함
-                break;
-            case DTC_EVENT_READ_ALL:
-                printf("[SPI Task] Reading DTCs for CAN.\r\n");
-                uint8_t count = eeprom_read_all_dtcs(dtc_buffer);
-                txHeader.StdId = 0x7E8; txHeader.IDE = CAN_ID_STD; txHeader.RTR = CAN_RTR_DATA;
-                if (count == 0) {
-                    txHeader.DLC = 3; txData[0] = 0x59; txData[1] = 0x02; txData[2] = 0xFF; // No DTC
-                    HAL_CAN_AddTxMessage(&hcan1, &txHeader, txData, &txMailbox);
-                } else {
-                    for(int i = 0; i < count; i++) {
-                        txHeader.DLC = 6;
-                        txData[0] = 0x59; txData[1] = 0x02;
-                        txData[2] = (dtc_buffer[i] >> 16) & 0xFF;
-                        txData[3] = (dtc_buffer[i] >> 8) & 0xFF;
-                        txData[4] = dtc_buffer[i] & 0xFF;
-                        txData[5] = 0x01;    // status: confirmed
-                        HAL_CAN_AddTxMessage(&hcan1, &txHeader, txData, &txMailbox);
-                        osSemaphoreAcquire(canTxDoneSemaphoreHandle, 100);
-                    }
-                }
-                break;
-            case DTC_EVENT_CLEAR_ALL:
-                printf("[SPI Task] Clearing all DTCs.\r\n");
-                eeprom_clear_all_dtcs();
-                break;
-        }
-        osMutexRelease(eepromMutexHandle);
-    }
+    osMutexAcquire(eepromMutexHandle, osWaitForever);
+    EEPROM_WriteDTC();   // EEPROM에 DTC 백업
+    osMutexRelease(eepromMutexHandle);
+    osDelay(5000);
   }
 }
 
-void UartMonitorTask(void *argument) {
-    char msg[] = "ECU Alive...\r\n";
+void DtcProcessingTask(void *argument) {
+    DtcEvent_t event;
     for(;;) {
-        HAL_UART_Transmit(&huart2, (uint8_t*)msg, strlen(msg), 200);
-        osDelay(1000);
+        if (osMessageQueueGet(dtcProcessingQueueHandle, &event, NULL, osWaitForever) == osOK) {
+            if (event.command == DTC_EVENT_WRITE) {
+                osMutexAcquire(eepromMutexHandle, osWaitForever);
+                EEPROM_LogNewDTC(event.dtc_code);                   // Fault 즉시 EEPROM 저장
+                osMutexRelease(eepromMutexHandle);
+            }
+        }
     }
 }
+
+// 브레이크 페달 신호를 감지하고 시스템 상태를 관리하는 Task
+void BrakeControlTask(void *argument) {
+  for(;;) {
+    bool isPedalPressed = (HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_13) == GPIO_PIN_RESET);   // PC13 핀에 브레이크 페달 신호가 연결되어 있다고 가정
+    bool isPressureZero = true;                // 압력을 확인하는 별도의 함수 구현 필요
+    if (g_SystemState == SYS_STATE_FAULT) {    // fault 상태일 경우 모터, 밸브를 모두 deactivate 시킴
+        Deactivate_Motor_And_Valve();
+    }
+    else if (isPedalPressed) {
+      // 페달이 밟히면 즉시 브레이킹 상태로 전환
+      if(g_SystemState != SYS_STATE_BRAKING) {
+          g_SystemState = SYS_STATE_BRAKING;
+      }
+    }
+    else {
+      if (g_SystemState == SYS_STATE_BRAKING && isPressureZero) {            // 페달을 뗐고, 압력이 0이며, 현재 브레이킹 상태일 때만 IDLE로 복귀
+          g_SystemState = SYS_STATE_IDLE;
+      }
+    }
+    osDelay(20);
+  }
+}
+
+// SW 다운로드 신호를 처리하는 GPIO 인터럽트 콜백 함수
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin) {
+    if (GPIO_Pin == GPIO_PIN_0) {   				      // P0에 다운로드 시그널 연결 가정
+        if (g_SystemState == SYS_STATE_BRAKING) {         // 브레이크 작동 중 상태에서는 다운로드 시그널 무시
+            return;
+        }
+        if (g_SystemState == SYS_STATE_IDLE) {            // 브레이크 대기 상태에서만 다운로드
+            g_SystemState = SYS_STATE_DOWNLOAD_READY;
+        }
+    }
+}
+
 /* USER CODE END 4 */
+
+/* USER CODE BEGIN Header_StartDefaultTask */
+/**
+  * @brief  Function implementing the defaultTask thread.
+  * @param  argument: Not used
+  * @retval None
+  */
+/* USER CODE END Header_StartDefaultTask */
+void StartDefaultTask(void *argument)
+{
+  /* USER CODE BEGIN 5 */
+  /* Infinite loop */
+  for(;;)
+  {
+    osDelay(1);
+  }
+  /* USER CODE END 5 */
+}
 
 /**
   * @brief  This function is executed in case of error occurrence.
@@ -406,14 +511,14 @@ void UartMonitorTask(void *argument) {
 void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
-  __disable_irq();    // 모든 인터럽트를 비활성화하고 시스템을 멈춤
+  /* User can add his own implementation to report the HAL error return state */
+  __disable_irq();
   while (1)
   {
   }
   /* USER CODE END Error_Handler_Debug */
 }
-
-#ifdef  USE_FULL_ASSERT
+#ifdef USE_FULL_ASSERT
 /**
   * @brief  Reports the name of the source file and the source line number
   *         where the assert_param error has occurred.

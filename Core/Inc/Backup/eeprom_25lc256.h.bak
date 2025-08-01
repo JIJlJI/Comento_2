@@ -4,31 +4,26 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-// 각 DTC 종류별로 저장할 EEPROM 내부 주소 정의
-#define DTC_UV_ADDRESS 100
-#define DTC_OV_ADDRESS 104
-#define DTC_OC_ADDRESS 108
-#define DTC_OT_ADDRESS 112
+#define EEPROM_CMD_WREN   0x06    // 쓰기 가능 상태로 만듦
+#define EEPROM_CMD_WRITE  0x02    // 데이터를 EEPROM에 쓰는 명령
+#define EEPROM_CMD_READ   0x03
+#define EEPROM_CMD_RDSR   0x05
+#define EEPROM_DTC_ADDR   0x0000  // DTC 데이터를 저장할 시작 주소
 
-// DTC 코드 예시 정의
-#define DTC_CODE_UV 0xB0000001
-#define DTC_CODE_OV 0xB0000002
-#define DTC_CODE_OC 0xB0000003
-#define DTC_CODE_OT 0xB0000004
+// DTC 데이터 구조체
+typedef struct {
+    uint16_t DTC_Code;       // 고장 코드
+    char Description[50];    // 설명 문자열
+    uint8_t active;          // 활성화 상태
+} DTC_Table_t;
 
-/**
- * @brief EEPROM의 특정 주소에 32비트 데이터를 씁니다.
- * @param address 데이터를 쓸 EEPROM 내부 주소
- * @param data 저장할 32비트 데이터
- * @return bool 쓰기 성공 여부
- */
-bool eeprom_write_32bit(uint16_t address, uint32_t data);
+extern DTC_Table_t DTC_Table;   // 다른 파일에서도 DTC_Table 변수를 사용할 수 있도록 extern 선언
 
-/**
- * @brief EEPROM의 특정 주소에서 32비트 데이터를 읽습니다.
- * @param address 데이터를 읽을 EEPROM 내부 주소
- * @return uint32_t 읽어온 32비트 데이터
- */
-uint32_t eeprom_read_32bit(uint16_t address);
+
+void EEPROM_WriteDTC(void);
+void EEPROM_ReadDTC(void);
+bool EEPROM_LogNewDTC(uint32_t dtc_code);
+uint8_t EEPROM_ReadAllDTCs(uint32_t *dtc_buffer);
+void EEPROM_ClearAllDTCs(void);
 
 #endif /* EEPROM_25LC256_H */

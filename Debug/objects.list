@@ -1,3 +1,5 @@
+"./Core/Src/CAN_task.o"
+"./Core/Src/UART_task.o"
 "./Core/Src/eeprom_25lc256.o"
 "./Core/Src/freertos.o"
 "./Core/Src/main.o"

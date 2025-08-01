@@ -1,0 +1,78 @@
+/*
+ * CAN_task.c
+ *
+ *  Created on: Jul 31, 2025
+ *      Author: pythonjihyun
+ */
+#include "CAN_task.h"
+#include "cmsis_os.h"
+#include "main.h"
+#include "eeprom_25lc256.h"
+
+extern CAN_HandleTypeDef hcan1;
+extern osMessageQueueId_t CanQueueHandle;
+extern osMutexId_t CommMutexHandleHandle;
+
+static CAN_RxHeaderTypeDef RxHeader;
+static uint8_t RxData[8];
+
+void CAN_Init(void) {
+    HAL_CAN_Start(&hcan1);
+    HAL_CAN_ActivateNotification(&hcan1, CAN_IT_RX_FIFO0_MSG_PENDING);
+}
+
+// 인터럽트 콜백 -> 수신 데이터 큐에 넣기
+void CAN_RxCallback(CAN_HandleTypeDef *hcan) {
+    HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO0, &RxHeader, RxData);
+    osMessageQueuePut(CanQueueHandle, RxData, 0, 0);
+}
+
+// CAN 응답 전송 함수
+void Process_CAN_Response(uint8_t *data) {
+    CAN_TxHeaderTypeDef TxHeader;
+    uint32_t TxMailbox;
+    uint8_t TxData[8] = {0};
+
+    TxHeader.StdId = 0x7E8;
+    TxHeader.IDE = CAN_ID_STD;
+    TxHeader.RTR = CAN_RTR_DATA;
+    TxHeader.DLC = 8;
+
+    // OBD2 Mode 03: Read DTC
+    if (data[1] == 0x43) {
+        if (DTC_Table.active) {
+            TxData[0] = 0x03; TxData[1] = 0x43;
+            TxData[2] = (DTC_Table.DTC_Code >> 8) & 0xFF;
+            TxData[3] = DTC_Table.DTC_Code & 0xFF;
+        } else {
+            TxData[0] = 0x01; TxData[1] = 0x43; TxData[2] = 0x00;
+        }
+    }
+    // OBD2 Mode 04: Clear DTC
+    else if (data[1] == 0x04) {
+        DTC_Table.active = 0;
+        EEPROM_WriteDTC();
+        TxData[0] = 0x01; TxData[1] = 0x44;
+    }
+    else {
+        // 기타 명령은 무시
+        return;
+    }
+
+    HAL_CAN_AddTxMessage(&hcan1, &TxHeader, TxData, &TxMailbox);
+}
+
+// CAN Task
+void CAN_StartTask(void *argument) {
+    uint8_t rxBuf[8];
+    for(;;) {
+        if (osMessageQueueGet(CanQueueHandle, rxBuf, NULL, osWaitForever) == osOK) {
+            osMutexAcquire(CommMutexHandleHandle, osWaitForever);
+            Process_CAN_Response(rxBuf);
+            osMutexRelease(CommMutexHandleHandle);
+        }
+        osDelay(10);
+    }
+}
+
+
